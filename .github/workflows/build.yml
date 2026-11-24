@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Decompile Jar"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.12"
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: gradle build --continue --console=plain 2>&1 | tee build.log
+
+      - name: Error summary
+        if: always()
+        run: |
+          {
+            echo "## Build result"
+            echo "Error count: $(grep -c 'error:' build.log || true)"
+            echo ""
+            echo "### Error types"
+            echo '```'
+            grep 'error:' build.log | sed 's/^.*error: //' | sort | uniq -c | sort -rn | head -n 20 || true
+            echo '```'
+            echo ""
+            echo "### First 40 errors"
+            echo '```'
+            grep 'error:' build.log | sed 's#.*/src/main/java/##' | head -n 40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Commit build log
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/logs
+          cp build.log /tmp/logs/build.log
+          grep -E "error:|FAILED|BUILD" build.log | head -n 400 > /tmp/logs/errors.txt || true
+          git config user.name "build-bot"
+          git config user.email "build-bot@users.noreply.github.com"
+          git fetch origin main
+          git reset --hard origin/main
+          mkdir -p logs
+          cp /tmp/logs/build.log logs/build.log
+          cp /tmp/logs/errors.txt logs/errors.txt
+          git add -f logs
+          git diff --cached --quiet || git commit -m "Build log"
+          git push origin HEAD:main
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: wexaware-0_0_9
+          path: build/libs/wexaware-0_0_9.jar
+          if-no-files-found: error
